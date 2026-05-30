@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Data.SqlClient;
+using System.Data;
 
 namespace ProjetoAWS.Controllers
 {
@@ -7,28 +8,72 @@ namespace ProjetoAWS.Controllers
     [ApiController]
     public class ClientesController : ControllerBase
     {
-        private readonly IMemoryCache _cache;
+        private readonly string _connectionString;
 
-        private const string CacheKey = "clientes";
-
-        public ClientesController(IMemoryCache cache)
+        public ClientesController(IConfiguration configuration)
         {
-            _cache = cache;
+            _connectionString = configuration.GetConnectionString("BDClientes")
+                ?? throw new InvalidOperationException("Connection string 'BDClientes' não encontrada.");
         }
 
         [HttpGet]
         public ActionResult<IEnumerable<Cliente>> Get()
         {
-            var clientes = ObterClientes();
+            var clientes = new List<Cliente>();
+
+            using var connection = new SqlConnection(_connectionString);
+            using var command = new SqlCommand(@"
+                SELECT Id, Nome, Email, Telefone, Cpf
+                FROM Clientes
+                ORDER BY Id", connection);
+
+            connection.Open();
+
+            using var reader = command.ExecuteReader();
+
+            while (reader.Read())
+            {
+                clientes.Add(new Cliente
+                {
+                    Id = reader.GetInt32("Id"),
+                    Nome = reader.GetString("Nome"),
+                    Email = reader.GetString("Email"),
+                    Telefone = reader.GetString("Telefone"),
+                    Cpf = reader.GetString("Cpf")
+                });
+            }
+
             return Ok(clientes);
         }
 
         [HttpGet("{id:int}")]
         public ActionResult<Cliente> GetById(int id)
         {
-            var clientes = ObterClientes();
+            Cliente? cliente = null;
 
-            var cliente = clientes.FirstOrDefault(c => c.Id == id);
+            using var connection = new SqlConnection(_connectionString);
+            using var command = new SqlCommand(@"
+                SELECT Id, Nome, Email, Telefone, Cpf
+                FROM Clientes
+                WHERE Id = @Id", connection);
+
+            command.Parameters.Add("@Id", SqlDbType.Int).Value = id;
+
+            connection.Open();
+
+            using var reader = command.ExecuteReader();
+
+            if (reader.Read())
+            {
+                cliente = new Cliente
+                {
+                    Id = reader.GetInt32("Id"),
+                    Nome = reader.GetString("Nome"),
+                    Email = reader.GetString("Email"),
+                    Telefone = reader.GetString("Telefone"),
+                    Cpf = reader.GetString("Cpf")
+                };
+            }
 
             if (cliente == null)
                 return NotFound("Cliente não encontrado.");
@@ -42,15 +87,20 @@ namespace ProjetoAWS.Controllers
             if (cliente == null)
                 return BadRequest("Dados do cliente inválidos.");
 
-            var clientes = ObterClientes();
+            using var connection = new SqlConnection(_connectionString);
+            using var command = new SqlCommand(@"
+                INSERT INTO Clientes (Nome, Email, Telefone, Cpf)
+                OUTPUT INSERTED.Id
+                VALUES (@Nome, @Email, @Telefone, @Cpf)", connection);
 
-            cliente.Id = clientes.Any()
-                ? clientes.Max(c => c.Id) + 1
-                : 1;
+            command.Parameters.Add("@Nome", SqlDbType.VarChar, 150).Value = cliente.Nome;
+            command.Parameters.Add("@Email", SqlDbType.VarChar, 150).Value = cliente.Email;
+            command.Parameters.Add("@Telefone", SqlDbType.VarChar, 30).Value = cliente.Telefone;
+            command.Parameters.Add("@Cpf", SqlDbType.VarChar, 20).Value = cliente.Cpf;
 
-            clientes.Add(cliente);
+            connection.Open();
 
-            SalvarClientes(clientes);
+            cliente.Id = (int)command.ExecuteScalar()!;
 
             return CreatedAtAction(nameof(GetById), new { id = cliente.Id }, cliente);
         }
@@ -61,61 +111,52 @@ namespace ProjetoAWS.Controllers
             if (clienteAtualizado == null)
                 return BadRequest("Dados do cliente inválidos.");
 
-            var clientes = ObterClientes();
+            using var connection = new SqlConnection(_connectionString);
+            using var command = new SqlCommand(@"
+                UPDATE Clientes
+                SET 
+                    Nome = @Nome,
+                    Email = @Email,
+                    Telefone = @Telefone,
+                    Cpf = @Cpf
+                WHERE Id = @Id", connection);
 
-            var cliente = clientes.FirstOrDefault(c => c.Id == id);
+            command.Parameters.Add("@Id", SqlDbType.Int).Value = id;
+            command.Parameters.Add("@Nome", SqlDbType.VarChar, 150).Value = clienteAtualizado.Nome;
+            command.Parameters.Add("@Email", SqlDbType.VarChar, 150).Value = clienteAtualizado.Email;
+            command.Parameters.Add("@Telefone", SqlDbType.VarChar, 30).Value = clienteAtualizado.Telefone;
+            command.Parameters.Add("@Cpf", SqlDbType.VarChar, 20).Value = clienteAtualizado.Cpf;
 
-            if (cliente == null)
+            connection.Open();
+
+            var linhasAfetadas = command.ExecuteNonQuery();
+
+            if (linhasAfetadas == 0)
                 return NotFound("Cliente não encontrado.");
 
-            cliente.Nome = clienteAtualizado.Nome;
-            cliente.Email = clienteAtualizado.Email;
-            cliente.Telefone = clienteAtualizado.Telefone;
-            cliente.Cpf = clienteAtualizado.Cpf;
+            clienteAtualizado.Id = id;
 
-            SalvarClientes(clientes);
-
-            return Ok(cliente);
+            return Ok(clienteAtualizado);
         }
 
         [HttpDelete("{id:int}")]
         public IActionResult Delete(int id)
         {
-            var clientes = ObterClientes();
+            using var connection = new SqlConnection(_connectionString);
+            using var command = new SqlCommand(@"
+                DELETE FROM Clientes
+                WHERE Id = @Id", connection);
 
-            var cliente = clientes.FirstOrDefault(c => c.Id == id);
+            command.Parameters.Add("@Id", SqlDbType.Int).Value = id;
 
-            if (cliente == null)
+            connection.Open();
+
+            var linhasAfetadas = command.ExecuteNonQuery();
+
+            if (linhasAfetadas == 0)
                 return NotFound("Cliente não encontrado.");
 
-            clientes.Remove(cliente);
-
-            SalvarClientes(clientes);
-
             return NoContent();
-        }
-
-        private List<Cliente> ObterClientes()
-        {
-            if (!_cache.TryGetValue(CacheKey, out List<Cliente>? clientes))
-            {
-                clientes = new List<Cliente>();
-
-                _cache.Set(CacheKey, clientes, new MemoryCacheEntryOptions
-                {
-                    SlidingExpiration = TimeSpan.FromMinutes(30)
-                });
-            }
-
-            return clientes;
-        }
-
-        private void SalvarClientes(List<Cliente> clientes)
-        {
-            _cache.Set(CacheKey, clientes, new MemoryCacheEntryOptions
-            {
-                SlidingExpiration = TimeSpan.FromMinutes(30)
-            });
         }
     }
 
